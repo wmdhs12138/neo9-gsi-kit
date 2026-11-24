@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Enable native AOSP / Infinity-X Screen-Off UDFPS & keep DozeService bound on screen-off -->
+    <bool name="config_screen_off_udfps_enabled">true</bool>
+    <bool name="config_screen_off_udfps_default_on">true</bool>
+    <bool name="config_dozeAfterScreenOffByDefault">true</bool>
+</resources>

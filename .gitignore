@@ -1,0 +1,21 @@
+# Private signing keys & generated certificates (NEVER commit!)
+*.pem
+*.der
+*.key
+*.jks
+*.pk8
+
+# Built binaries, APKs, JNI shared objects, and proprietary/extracted blobs
+*.apk
+*.so
+*.db
+*.img
+*.img.xz
+udfps/neo9-udfps-bridge
+
+# Python / editor / runtime logs
+__pycache__/
+*.pyc
+*.pyo
+*.log
+.DS_Store
