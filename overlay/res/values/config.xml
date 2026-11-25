@@ -4,4 +4,121 @@
     <bool name="config_screen_off_udfps_enabled">true</bool>
     <bool name="config_screen_off_udfps_default_on">true</bool>
     <bool name="config_dozeAfterScreenOffByDefault">true</bool>
+
+    <!-- Enable Adaptive / Automatic Brightness (stock OriginOS 4 defines this in /product, not /vendor) -->
+    <bool name="config_automatic_brightness_available">true</bool>
+    <integer name="config_autoBrightnessBrighteningLightDebounce">1500</integer>
+    <integer name="config_autoBrightnessDarkeningLightDebounce">4000</integer>
+    <integer name="config_screenBrightnessSettingMinimum">1</integer>
+    <integer name="config_screenBrightnessSettingMaximum">255</integer>
+    <integer name="config_screenBrightnessSettingDefault">102</integer>
+    <integer name="config_screenBrightnessDim">10</integer>
+
+    <!-- PD2338 RM692H5 AMOLED physical backlight (1..255 -> 0..3615) to nits mapping from LcmBrightnessConfig.json -->
+    <integer-array name="config_screenBrightnessBacklight">
+        <item>1</item>
+        <item>3</item>
+        <item>6</item>
+        <item>13</item>
+        <item>26</item>
+        <item>38</item>
+        <item>51</item>
+        <item>64</item>
+        <item>77</item>
+        <item>102</item>
+        <item>128</item>
+        <item>153</item>
+        <item>179</item>
+        <item>204</item>
+        <item>230</item>
+        <item>255</item>
+    </integer-array>
+    <array name="config_screenBrightnessNits">
+        <item>1.93</item>
+        <item>2.23</item>
+        <item>2.70</item>
+        <item>4.11</item>
+        <item>9.64</item>
+        <item>18.25</item>
+        <item>30.36</item>
+        <item>45.68</item>
+        <item>63.86</item>
+        <item>107.97</item>
+        <item>165.80</item>
+        <item>231.02</item>
+        <item>315.66</item>
+        <item>406.19</item>
+        <item>511.34</item>
+        <item>795.23</item>
+    </array>
+
+    <!-- Ambient light (lux, stk33738 android.sensor.light) -> target screen brightness curve -->
+    <integer-array name="config_autoBrightnessLevels">
+        <item>1</item>
+        <item>2</item>
+        <item>5</item>
+        <item>10</item>
+        <item>20</item>
+        <item>30</item>
+        <item>50</item>
+        <item>100</item>
+        <item>150</item>
+        <item>200</item>
+        <item>300</item>
+        <item>500</item>
+        <item>800</item>
+        <item>1000</item>
+        <item>2000</item>
+        <item>4000</item>
+        <item>6000</item>
+        <item>10000</item>
+        <item>20000</item>
+        <item>30000</item>
+    </integer-array>
+    <array name="config_autoBrightnessDisplayValuesNits">
+        <item>4.5</item>
+        <item>8.0</item>
+        <item>13.0</item>
+        <item>22.0</item>
+        <item>34.0</item>
+        <item>50.0</item>
+        <item>68.0</item>
+        <item>92.0</item>
+        <item>125.0</item>
+        <item>150.0</item>
+        <item>175.0</item>
+        <item>215.0</item>
+        <item>265.0</item>
+        <item>315.0</item>
+        <item>360.0</item>
+        <item>440.0</item>
+        <item>530.0</item>
+        <item>600.0</item>
+        <item>680.0</item>
+        <item>750.0</item>
+        <item>795.0</item>
+    </array>
+    <integer-array name="config_autoBrightnessLcdBacklightValues">
+        <item>14</item>
+        <item>22</item>
+        <item>31</item>
+        <item>42</item>
+        <item>54</item>
+        <item>67</item>
+        <item>80</item>
+        <item>94</item>
+        <item>110</item>
+        <item>121</item>
+        <item>132</item>
+        <item>147</item>
+        <item>164</item>
+        <item>179</item>
+        <item>192</item>
+        <item>213</item>
+        <item>232</item>
+        <item>240</item>
+        <item>246</item>
+        <item>252</item>
+        <item>255</item>
+    </integer-array>
 </resources>
