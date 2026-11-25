@@ -5,13 +5,15 @@
 *.jks
 *.pk8
 
-# Built binaries, APKs, JNI shared objects, and proprietary/extracted blobs
+# Built binaries, APKs, DEXs, JNI shared objects, and proprietary/extracted blobs
 *.apk
+*.dex
 *.so
 *.db
 *.img
 *.img.xz
 udfps/neo9-udfps-bridge
+camera/neo9_vivocameraserver
 
 # Python / editor / runtime logs
 __pycache__/

@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Exclude PD2338 Vivo Dummy camera IDs (4..18 = Master_Dummy / Wide_Dummy) from LineageOS Aperture -->
+    <!-- Keeps 0 (Main IMX920), 1 (Front S5K3P9SP), 2 (Logical MultiCamera), 3 (Ultra-Wide OV08D10) -->
+    <bool name="config_enableAuxCameras">true</bool>
+    <bool name="config_ignoreLogicalAuxCameras">true</bool>
+    <string-array name="config_ignoredAuxCameraIds">
+        <item>4</item>
+        <item>5</item>
+        <item>6</item>
+        <item>7</item>
+        <item>8</item>
+        <item>9</item>
+        <item>10</item>
+        <item>11</item>
+        <item>12</item>
+        <item>13</item>
+        <item>14</item>
+        <item>15</item>
+        <item>16</item>
+        <item>17</item>
+        <item>18</item>
+    </string-array>
+</resources>

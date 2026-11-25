@@ -1,0 +1,32 @@
+<manifest version="1.0" type="framework">
+    <hal format="hidl">
+        <name>vendor.vivo.hardware.camera.cameralog</name>
+        <transport>hwbinder</transport>
+        <fqname>@1.0::ICameraLogSystem/default</fqname>
+    </hal>
+    <hal format="hidl">
+        <name>vendor.vivo.hardware.camera.provider</name>
+        <transport>hwbinder</transport>
+        <fqname>@1.0::IVivoCameraProvider/default</fqname>
+    </hal>
+    <hal format="hidl">
+        <name>vendor.vivo.hardware.camera.vop</name>
+        <transport>hwbinder</transport>
+        <fqname>@1.0::ICameraVOP/default/0</fqname>
+    </hal>
+    <hal format="hidl">
+        <name>vendor.vivo.hardware.camera3rd.provider</name>
+        <transport>hwbinder</transport>
+        <fqname>@1.0::ICamera3rdProvider/default</fqname>
+    </hal>
+    <hal format="hidl">
+        <name>vendor.vivo.hardware.nativecamera.provider</name>
+        <transport>hwbinder</transport>
+        <fqname>@1.0::INativeCameraProvider/default</fqname>
+    </hal>
+    <hal format="hidl">
+        <name>vendor.vivo.hardware.osccamera.provider</name>
+        <transport>hwbinder</transport>
+        <fqname>@1.0::IOscCameraProvider/default</fqname>
+    </hal>
+</manifest>
