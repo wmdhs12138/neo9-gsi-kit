@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Map PD2338 RM692H5 hardware 3D-LUT RenderIntents in Settings -> Display -> Colors -->
+    <integer-array name="config_color_mode_options_values" translatable="false">
+        <item>500</item>
+        <item>0</item>
+        <item>502</item>
+    </integer-array>
+    <string-array name="config_color_mode_options_strings">
+        <item>Standard (Calibrated P3)</item>
+        <item>Pro (Natural sRGB / P3)</item>
+        <item>Vivid (Wide Gamut)</item>
+    </string-array>
+</resources>

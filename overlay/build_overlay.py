@@ -198,22 +198,38 @@ def sign_apk_v2(in_apk: str, out_apk: str):
             os.unlink(p)
 
 
-def main():
-    ensure_key_and_cert()
+def build_rro(manifest_path: str, res_dir: str, out_apk: str):
     with tempfile.TemporaryDirectory() as td:
         raw_apk = os.path.join(td, "raw.apk")
         aligned_apk = os.path.join(td, "aligned.apk")
         subprocess.check_call([
             "aapt", "package", "-f",
-            "-M", os.path.join(KIT_DIR, "AndroidManifest.xml"),
-            "-S", os.path.join(KIT_DIR, "res"),
+            "-M", manifest_path,
+            "-S", res_dir,
             "-I", FRAMEWORK_RES,
             "-F", raw_apk,
             "-0", "arsc",
         ])
         zipalign_apk(raw_apk, aligned_apk)
-        sign_apk_v2(aligned_apk, OUT_APK)
-    print(f"Built & APK-v2 signed RRO overlay: {OUT_APK} ({os.path.getsize(OUT_APK)} bytes)")
+        sign_apk_v2(aligned_apk, out_apk)
+    print(f"Built & APK-v2 signed RRO overlay: {out_apk} ({os.path.getsize(out_apk)} bytes)")
+
+
+def main():
+    ensure_key_and_cert()
+    build_rro(
+        os.path.join(KIT_DIR, "AndroidManifest.xml"),
+        os.path.join(KIT_DIR, "res"),
+        OUT_APK,
+    )
+    settings_dir = os.path.join(KIT_DIR, "settings_overlay")
+    if os.path.isdir(settings_dir):
+        settings_apk = os.path.join(KIT_DIR, "Neo9SettingsOverlay.apk")
+        build_rro(
+            os.path.join(settings_dir, "AndroidManifest.xml"),
+            os.path.join(settings_dir, "res"),
+            settings_apk,
+        )
 
 
 if __name__ == "__main__":

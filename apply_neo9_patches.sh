@@ -9,6 +9,7 @@ KEY_PEM="$3"
 KIT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BRIDGE_BIN="$KIT_DIR/udfps/neo9-udfps-bridge"
 OVERLAY_APK="$KIT_DIR/overlay/Neo9UdfpsOverlay.apk"
+SETTINGS_OVERLAY="$KIT_DIR/overlay/Neo9SettingsOverlay.apk"
 CAFIMS_PHONE_OVERLAY="$KIT_DIR/telephony/Neo9CafImsPhoneOverlay.apk"
 CARRIER_CFG_OVERLAY="$KIT_DIR/telephony/Neo9CarrierConfigOverlay.apk"
 QTI_IMS_APK="$KIT_DIR/telephony/Neo9QtiIms.apk"
@@ -135,9 +136,22 @@ if [ -f "$SE_CIL" ] && ! grep -q "phhsu_daemon cameraserver_service" "$SE_CIL"; 
 EOF
     chmod 0644 "$SE_CIL"
 fi
+# Restore PD2338 /oem/etc/qdcm_calib_data_mdss_dsi_pd2338_m383_rm692h5_cmd_panel.json SELinux mapping
+# Vendor plat_pub_versioned.cil declares (type oem_qdcm_file) + (typeattribute oem_qdcm_file_33_0) without binding them,
+# so on non-DSU boots (where real /oem is mounted) hal_graphics_composer_default needs explicit oem_qdcm_file access.
+if [ -f "$SE_CIL" ] && ! grep -q "typeattributeset oem_qdcm_file_33_0" "$SE_CIL"; then
+    cat >> "$SE_CIL" <<'EOF'
+(typeattributeset oem_qdcm_file_33_0 (oem_qdcm_file))
+(typeattributeset oem_vivo_config_ini_file_33_0 (oem_vivo_config_ini_file))
+(allow hal_graphics_composer_default oem_qdcm_file (file (ioctl read getattr lock map open watch watch_reads)))
+(allow hal_graphics_composer_default oemfs (dir (ioctl read getattr lock open watch watch_reads search)))
+(allow hal_graphics_composer_default system_file (dir (search getattr open read)))
+EOF
+    chmod 0644 "$SE_CIL"
+fi
 
-# 3b. Install native static RRO Overlays (UDFPS + CAF IMS Phone + CarrierConfig + Aperture Dummy-ID filter)
-for ov in "$OVERLAY_APK" "$CAFIMS_PHONE_OVERLAY" "$CARRIER_CFG_OVERLAY" "$APERTURE_OVERLAY"; do
+# 3b. Install native static RRO Overlays (UDFPS/Display + Settings ColorModes + CAF IMS Phone + CarrierConfig + Aperture)
+for ov in "$OVERLAY_APK" "$SETTINGS_OVERLAY" "$CAFIMS_PHONE_OVERLAY" "$CARRIER_CFG_OVERLAY" "$APERTURE_OVERLAY"; do
     if [ -f "$ov" ]; then
         b="$(basename "$ov")"
         cp "$ov" "$MNT/system/product/overlay/$b"
@@ -146,6 +160,20 @@ for ov in "$OVERLAY_APK" "$CAFIMS_PHONE_OVERLAY" "$CARRIER_CFG_OVERLAY" "$APERTU
         chcon u:object_r:system_file:s0 "$MNT/system/product/overlay/$b"
     fi
 done
+
+# 3b0. Stage PD2338 RM692H5 QDCM display calibration JSON into /system_ext/etc/ for DSU boots
+# Under DSU, first_stage_mount does NOT mount the host /oem erofs partition, leaving /oem empty so
+# vendor.qti.hardware.display.composer-service (libqdcm-json-mode-parser.so) loads zero color modes.
+# rw-system.sh bind-mounts this JSON into /oem/etc/ at post-fs before composer starts.
+QDCM_SRC="/oem/etc/qdcm_calib_data_mdss_dsi_pd2338_m383_rm692h5_cmd_panel.json"
+if [ -f "$QDCM_SRC" ]; then
+    echo "[3b0] Staging PD2338 RM692H5 QDCM calibration JSON into /system_ext/etc/..."
+    mkdir -p "$MNT/system/system_ext/etc"
+    cp "$QDCM_SRC" "$MNT/system/system_ext/etc/neo9_qdcm_rm692h5.json"
+    chmod 0644 "$MNT/system/system_ext/etc/neo9_qdcm_rm692h5.json"
+    chown 0:0 "$MNT/system/system_ext/etc/neo9_qdcm_rm692h5.json"
+    chcon u:object_r:system_file:s0 "$MNT/system/system_ext/etc/neo9_qdcm_rm692h5.json"
+fi
 
 # 3b2. Module 2: Install Qualcomm Hardware AIDL IMS (org.codeaurora.ims -> IImsRadio/imsradio0,1)
 if [ -f "$QTI_IMS_APK" ] && [ -f "$QTI_IMS_PERM" ] && [ -f "$OVERLAY_CERT_DER" ]; then
@@ -546,6 +574,22 @@ if getprop ro.vendor.build.fingerprint | grep -qi "vivo/PD2338"; then
         mount -o bind "$NEO9_CAMX_DST" "$NEO9_CAMX_SRC" >> "$NEO9_LOG" 2>&1
         echo "[rw-system] bind-mounted $NEO9_CAMX_DST -> $NEO9_CAMX_SRC (logInfoMask=0x0, overrideLogLevels=0x0, ctx=$NEO9_CAMX_CTX, rc=$?)" >> "$NEO9_LOG" 2>&1
     fi
+
+    # NEO9_QDCM_HOOK: under DSU, /oem is not mounted by first_stage_mount, leaving /oem empty so
+    # vendor.qti.hardware.display.composer-service loads zero RM692H5 color modes (only NATIVE 0).
+    # Bind-mount staged RM692H5 QDCM calibration JSON onto /oem/etc/ before composer starts (on post-fs).
+    NEO9_QDCM_SRC="/system/system_ext/etc/neo9_qdcm_rm692h5.json"
+    NEO9_QDCM_NAME="qdcm_calib_data_mdss_dsi_pd2338_m383_rm692h5_cmd_panel.json"
+    if [ -f "$NEO9_QDCM_SRC" ] && [ ! -f "/oem/etc/$NEO9_QDCM_NAME" ]; then
+        mkdir -p /mnt/phh/neo9_oem/etc
+        cp "$NEO9_QDCM_SRC" "/mnt/phh/neo9_oem/etc/$NEO9_QDCM_NAME"
+        chmod 0755 /mnt/phh/neo9_oem /mnt/phh/neo9_oem/etc
+        chmod 0644 "/mnt/phh/neo9_oem/etc/$NEO9_QDCM_NAME"
+        chcon u:object_r:vendor_configs_file:s0 /mnt/phh/neo9_oem /mnt/phh/neo9_oem/etc "/mnt/phh/neo9_oem/etc/$NEO9_QDCM_NAME" >> "$NEO9_LOG" 2>&1 || true
+        mount -o bind /mnt/phh/neo9_oem /oem >> "$NEO9_LOG" 2>&1
+        echo "[rw-system] bind-mounted /mnt/phh/neo9_oem -> /oem (rc=$?)" >> "$NEO9_LOG" 2>&1
+        ls -laZ /oem /oem/etc >> "$NEO9_LOG" 2>&1
+    fi
 fi
 EOF
 fi
@@ -692,7 +736,8 @@ for chk in \
     "$MNT/system/system_ext/etc/selinux/system_ext_file_contexts:file_contexts_file" \
     "$MNT/system/system_ext/etc/selinux/system_ext_service_contexts:service_contexts_file" \
     "$MNT/system/system_ext/etc/selinux/system_ext_mac_permissions.xml:mac_perms_file" \
-    "$MNT/system/system_ext/etc/selinux/system_ext_seapp_contexts:seapp_contexts_file"; do
+    "$MNT/system/system_ext/etc/selinux/system_ext_seapp_contexts:seapp_contexts_file" \
+    "$MNT/system/system_ext/etc/neo9_qdcm_rm692h5.json:system_file"; do
     f="${chk%:*}"; t="${chk#*:}"
     ls -lZ "$f" | grep -q ":$t:" || { echo "FATAL: SELinux label mismatch on $f (expected $t)!"; exit 1; }
 done

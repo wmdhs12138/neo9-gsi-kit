@@ -5,6 +5,18 @@
     <bool name="config_screen_off_udfps_default_on">true</bool>
     <bool name="config_dozeAfterScreenOffByDefault">true</bool>
 
+    <!-- PD2338 RM692H5 hardware 3D-LUT Display Color Modes (QTI SDM RenderIntents):
+         500 (0x1f4) = OriginOS Standard (std_sRGB / std_P3 calibrated 3D-LUT)
+           0         = OriginOS Pro / Natural (sRGB / display_P3 calibrated 3D-LUT)
+         502 (0x1f6) = OriginOS Vivid / Bright (native wide-gamut 3D-LUT with color management)
+         Note: PD2338 HWC does NOT advertise standard RenderIntent::ENHANCE (1), so AOSP Adaptive (3) was a no-op. -->
+    <integer name="config_defaultDisplayDefaultColorMode">500</integer>
+    <integer-array name="config_availableColorModes">
+        <item>500</item>
+        <item>0</item>
+        <item>502</item>
+    </integer-array>
+
     <!-- Enable Adaptive / Automatic Brightness (stock OriginOS 4 defines this in /product, not /vendor) -->
     <bool name="config_automatic_brightness_available">true</bool>
     <integer name="config_autoBrightnessBrighteningLightDebounce">1500</integer>
