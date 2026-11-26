@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="max_refresh_rate_title">Screen refresh rate</string>
+    <string name="extreme_refresh_rate_summary">144 Hz does not support 8T LTPO and uses more power</string>
+</resources>

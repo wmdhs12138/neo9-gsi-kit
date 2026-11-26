@@ -43,6 +43,24 @@ if command -v llvm-readelf >/dev/null 2>&1; then
     done
 fi
 
+echo "[3b/8] Compiling Module 4 SurfaceFlinger 360Hz-TE EPT bridge (libneo9_sf_hook.so)..."
+clang -O2 -shared -fPIC -mbranch-protection=standard -Wall -Wextra -Werror \
+    -Wl,-soname,libneo9_sf_hook.so \
+    -L/system/lib64 -Wl,--no-as-needed -lpowermanager -llog -ldl \
+    -o "$KIT_DIR/display/libneo9_sf_hook.so" \
+    "$KIT_DIR/display/neo9_sf_hook.c"
+strip "$KIT_DIR/display/libneo9_sf_hook.so" 2>/dev/null || true
+if command -v llvm-readelf >/dev/null 2>&1; then
+    if llvm-readelf -d "$KIT_DIR/display/libneo9_sf_hook.so" | grep -q "libc++_shared"; then
+        echo "FATAL: libneo9_sf_hook.so unexpectedly links libc++_shared.so!" >&2
+        exit 1
+    fi
+    if ! llvm-readelf -d "$KIT_DIR/display/libneo9_sf_hook.so" | grep -q "libpowermanager.so"; then
+        echo "FATAL: libneo9_sf_hook.so missing DT_NEEDED libpowermanager.so!" >&2
+        exit 1
+    fi
+fi
+
 echo "[4/8] Building & APK-v2 signing static RRO overlays..."
 python3 "$KIT_DIR/overlay/build_overlay.py" "$FRAMEWORK_RES"
 python3 "$KIT_DIR/telephony/build_ims_overlays.py" "$FRAMEWORK_RES"

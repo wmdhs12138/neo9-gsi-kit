@@ -41,6 +41,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/inotify.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -57,9 +58,23 @@
 #define SYSFS_BL_LEVEL             "/sys/lcm/bl_level"
 #define SYSFS_BL_FALLBACK          "/sys/class/backlight/panel0-backlight/brightness"
 #define SYSFS_AOD_BL_LEVEL         "/sys/lcm/aod_bl_level"
+#define SYSFS_LTPO_MODE            "/sys/lcm/ltpo_mode"
 #define SYSFS_DRM_DPMS             "/sys/class/drm/card0-DSI-1/dpms"
 #define OLED_LHBM_ON               10   /* 0x0a -> panel_set_ud_local_hbm ON  */
 #define OLED_LHBM_OFF              11   /* 0x0b -> panel_set_ud_local_hbm OFF (also cancels pending LHBM) */
+
+/* RM692H5 8T LTPO brightness tiers (from PD2338 RrpConfig.json + LcmMapNit.json) */
+#define LTPO_BL_HIGH_ON            2009 /* >= 200 nit (smooth_brightness_max) */
+#define LTPO_BL_HIGH_OFF           1960 /* hysteresis band */
+#define LTPO_BL_MID_ON             1310 /* >= 90 nit */
+#define LTPO_BL_MID_OFF            1260 /* hysteresis band */
+#define LTPO_SYNC_INTERVAL_MS      1000
+
+/* Zero-idle-overhead Settings refresh-rate lock (sync min_refresh_rate = peak_refresh_rate) */
+#define SETTINGS_USER0_DIR         "/data/system/users/0"
+#define SETTINGS_SYSTEM_XML        "/data/system/users/0/settings_system.xml"
+#define PEAK_SIG_LEN               96
+#define SETTINGS_DEBOUNCE_MS       250
 
 #define SYSFS_VTS_APP_NAME         "/sys/touchscreen/app_name"
 #define SYSFS_VTS_GESTURE          "/sys/devices/virtual/vts/vivo_ts/status/gesture"
@@ -70,6 +85,20 @@
 #define IFP_SERVICE_NAME           "android.hardware.biometrics.fingerprint.IFingerprint/default"
 #define IFP_EXT_DESCRIPTOR         "vendor.vivo.hardware.biometrics.fingerprint.IFingerprintExt"
 #define TX_SEND_CMD_BUNDLE         1
+
+/* Stock OriginOS 4 VPerf HIDL 1.0 (vendor.vivo.hardware.vperf@1.0::IVPerf/default) */
+#define VPERF_INTERFACE_NAME       "vendor.vivo.hardware.vperf@1.0::IVPerf"
+#define VPERF_TX_LOCK_RELEASE      3u
+#define VPERF_TX_HINT_ACQ_REL      21u
+#define QTI_HINT_SCROLL_BOOST      0x00001080u /* perfboostsconfig.xml kalama 60/90/120/144 Hz */
+#define QTI_SCROLL_TYPE_VERTICAL   1           /* Vertical Scroll boost (BIG/LITTLE/PRIME + LLCC/DDR + L3 + SCHEDBOOST) */
+#define QTI_SCROLL_TYPE_LIGHT      5           /* Light Scroll boost (WALT adaptive high/low + SCHEDBOOST) */
+#define VPERF_TOUCH_DOWN_MS        150
+#define VPERF_TAP_OPEN_MS          400
+#define VPERF_DRAG_BOOST_MS        600
+#define VPERF_DRAG_RENEW_MS        300
+#define VPERF_FLING_BOOST_MS       900
+#define VPERF_MOVE_THRESH_PX       24
 
 #define CMD_ON_INTERACTIVE_CHANGED 32517 /* 0x7f05 */
 #define CMD_NOTIFY_FINGER_STATE    32534 /* 0x7f16: arg0=0 DOWN(evt=2), 1 UP(evt=4) */
@@ -242,6 +271,215 @@ static binder_status_t send_cmd(BinderApi* api, AIBinder* ext, int32_t cmd, int6
     }
     if (out) api->parcelDelete(out);
     return st;
+}
+
+/* ---- Stock OriginOS 4 IVPerf@1.0 HIDL Client (via /system/lib64/libhidlbase.so) ---- */
+typedef struct {
+    void*    ptr;
+    uint64_t pad[2]; /* >16 bytes forces ARM64 indirect return via x8 (matches C++ sp<T>) */
+} HidlSpRet;
+
+typedef struct {
+    uint64_t w0;
+    uint64_t w1;
+    uint64_t w2;
+} LibcxxString; /* 24-byte Android arm64 libc++ std::string */
+
+typedef struct {
+    const char* mBuffer;
+    uint32_t    mSize;
+    uint32_t    mOwnsAndPad;
+} HidlString;
+
+typedef struct {
+    const int32_t* mBuffer;
+    uint32_t       mSize;
+    uint32_t       mOwnsAndPad;
+} HidlVecI32;
+
+typedef struct {
+    uint64_t opaque[6]; /* 48-byte empty libc++ std::function<void(Parcel&)> */
+} HidlReplyCb;
+
+typedef HidlSpRet (*fn_hidl_get_raw_svc_t)(const LibcxxString* desc, const LibcxxString* inst, bool retry, bool getStub);
+typedef HidlSpRet (*fn_hidl_as_binder_t)(const void* iface);
+typedef void      (*fn_hidl_parcel_ctor_t)(void* parcel);
+typedef void      (*fn_hidl_parcel_dtor_t)(void* parcel);
+typedef int32_t   (*fn_hidl_parcel_write_token_t)(void* parcel, const char* token);
+typedef int32_t   (*fn_hidl_parcel_write_i32_t)(void* parcel, int32_t val);
+typedef int32_t   (*fn_hidl_parcel_write_u32_t)(void* parcel, uint32_t val);
+typedef int32_t   (*fn_hidl_parcel_write_buf_t)(void* parcel, const void* buf, size_t len, size_t* out_handle);
+typedef int32_t   (*fn_hidl_parcel_write_emb_buf_t)(void* parcel, const void* buf, size_t len, size_t* out_handle, size_t parent_handle, size_t parent_offset);
+typedef int32_t   (*fn_hidl_write_emb_str_t)(const HidlString* str, void* parcel, size_t parent_handle, size_t parent_offset);
+typedef int32_t   (*fn_hidl_parcel_read_i32_t)(const void* parcel, int32_t* out_val);
+typedef int32_t   (*fn_hidl_bphw_transact_t)(void* binder, uint32_t code, const void* data, void* reply, uint32_t flags, const HidlReplyCb* cb);
+
+typedef struct {
+    void*                          lib;
+    fn_hidl_get_raw_svc_t          getRawService;
+    fn_hidl_as_binder_t            asBinder;
+    fn_hidl_parcel_ctor_t          parcelCtor;
+    fn_hidl_parcel_dtor_t          parcelDtor;
+    fn_hidl_parcel_write_token_t   writeToken;
+    fn_hidl_parcel_write_i32_t     writeInt32;
+    fn_hidl_parcel_write_u32_t     writeUint32;
+    fn_hidl_parcel_write_buf_t     writeBuffer;
+    fn_hidl_parcel_write_emb_buf_t writeEmbBuf;
+    fn_hidl_write_emb_str_t        writeEmbStr;
+    fn_hidl_parcel_read_i32_t      readInt32;
+    fn_hidl_bphw_transact_t        transact;
+    void*                          vperf_binder;
+    int32_t                        active_handle;
+    int64_t                        last_connect_try_ms;
+    uint64_t                       boost_ok;
+    uint64_t                       boost_fail;
+    bool                           ready;
+} VPerfClient;
+
+static void init_libcxx_string(LibcxxString* out, const char* s) {
+    memset(out, 0, sizeof(*out));
+    size_t n = strlen(s);
+    if (n <= 22) {
+        uint8_t* b = (uint8_t*)out;
+        b[0] = (uint8_t)(n << 1);
+        memcpy(b + 1, s, n);
+    } else {
+        /* Android arm64 libc++ long string: LSB=1 in cap word, size in w1, ptr in w2 */
+        out->w0 = ((n + 16u) & ~(uint64_t)15u) | 1ULL;
+        out->w1 = (uint64_t)n;
+        out->w2 = (uint64_t)(uintptr_t)s;
+    }
+}
+
+static bool vperf_init(VPerfClient* vp) {
+    memset(vp, 0, sizeof(*vp));
+    vp->lib = dlopen("libhidlbase.so", RTLD_NOW);
+    if (!vp->lib) {
+        logi("VPERF: dlopen(libhidlbase.so) failed: %s", dlerror());
+        return false;
+    }
+#define LOAD_VP(field, sym) do { \
+    vp->field = dlsym(vp->lib, sym); \
+    if (!vp->field) { logi("VPERF: missing %s", sym); return false; } \
+} while (0)
+    LOAD_VP(getRawService, "_ZN7android8hardware7details21getRawServiceInternalERKNSt3__112basic_stringIcNS2_11char_traitsIcEENS2_9allocatorIcEEEESA_bb");
+    LOAD_VP(asBinder,      "_ZN7android8hardware10IInterface8asBinderEPKS1_");
+    LOAD_VP(parcelCtor,    "_ZN7android8hardware6ParcelC1Ev");
+    LOAD_VP(parcelDtor,    "_ZN7android8hardware6ParcelD1Ev");
+    LOAD_VP(writeToken,    "_ZN7android8hardware6Parcel19writeInterfaceTokenEPKc");
+    LOAD_VP(writeInt32,    "_ZN7android8hardware6Parcel10writeInt32Ei");
+    LOAD_VP(writeUint32,   "_ZN7android8hardware6Parcel11writeUint32Ej");
+    LOAD_VP(writeBuffer,   "_ZN7android8hardware6Parcel11writeBufferEPKvmPm");
+    LOAD_VP(writeEmbBuf,   "_ZN7android8hardware6Parcel19writeEmbeddedBufferEPKvmPmmm");
+    LOAD_VP(writeEmbStr,   "_ZN7android8hardware21writeEmbeddedToParcelERKNS0_11hidl_stringEPNS0_6ParcelEmm");
+    LOAD_VP(readInt32,     "_ZNK7android8hardware6Parcel9readInt32EPi");
+    LOAD_VP(transact,      "_ZN7android8hardware10BpHwBinder8transactEjRKNS0_6ParcelEPS2_jNSt3__18functionIFvRS2_EEE");
+#undef LOAD_VP
+    vp->ready = true;
+    return true;
+}
+
+static bool vperf_connect(VPerfClient* vp, int64_t now) {
+    if (!vp->ready) return false;
+    if (vp->vperf_binder) return true;
+    if (now > 0 && vp->last_connect_try_ms > 0 && (now - vp->last_connect_try_ms) < 5000) return false;
+    vp->last_connect_try_ms = now;
+
+    LibcxxString desc, inst;
+    init_libcxx_string(&desc, VPERF_INTERFACE_NAME);
+    init_libcxx_string(&inst, "default");
+    HidlSpRet ibase = vp->getRawService(&desc, &inst, false, false);
+    if (!ibase.ptr) return false;
+    /* BpHwBase's IInterface subobject sits at +8 (_ZTC...BpHwBaseE8_...IInterfaceE) */
+    HidlSpRet binder = vp->asBinder((const uint8_t*)ibase.ptr + 8u);
+    if (!binder.ptr) return false;
+    vp->vperf_binder = binder.ptr;
+    logi("VPERF: connected %s/default binder=%p", VPERF_INTERFACE_NAME, vp->vperf_binder);
+    return true;
+}
+
+static int32_t vperf_hint_acq_rel(VPerfClient* vp, int32_t prev_handle, uint32_t hint,
+                                  int32_t duration_ms, int32_t type, int64_t now) {
+    if (!vperf_connect(vp, now)) return -1;
+
+    uint64_t data_buf[64]  __attribute__((aligned(16)));
+    uint64_t reply_buf[64] __attribute__((aligned(16)));
+    memset(data_buf, 0, sizeof(data_buf));
+    memset(reply_buf, 0, sizeof(reply_buf));
+    vp->parcelCtor(data_buf);
+    vp->parcelCtor(reply_buf);
+
+    int32_t ret_handle = -1;
+    size_t str_parent = 0, vec_parent = 0, vec_child = 0;
+    HidlString empty_str = { "", 0u, 0u };
+    int32_t reserved_vals[2] = { 0, 0 };
+    HidlVecI32 reserved_vec = { reserved_vals, 0u, 0u };
+
+    int32_t st = vp->writeToken(data_buf, VPERF_INTERFACE_NAME);
+    if (st == 0) st = vp->writeInt32(data_buf, prev_handle);
+    if (st == 0) st = vp->writeUint32(data_buf, hint);
+    if (st == 0) st = vp->writeBuffer(data_buf, &empty_str, sizeof(empty_str), &str_parent);
+    if (st == 0) st = vp->writeEmbStr(&empty_str, data_buf, str_parent, 0);
+    if (st == 0) st = vp->writeInt32(data_buf, duration_ms);
+    if (st == 0) st = vp->writeInt32(data_buf, type);
+    if (st == 0) st = vp->writeBuffer(data_buf, &reserved_vec, sizeof(reserved_vec), &vec_parent);
+    if (st == 0) st = vp->writeEmbBuf(data_buf, reserved_vals, 0, &vec_child, vec_parent, 0);
+
+    if (st == 0) {
+        HidlReplyCb cb;
+        memset(&cb, 0, sizeof(cb));
+        st = vp->transact(vp->vperf_binder, VPERF_TX_HINT_ACQ_REL, data_buf, reply_buf, 0, &cb);
+        if (st == 0) {
+            int32_t exc = -1, h = -1;
+            if (vp->readInt32(reply_buf, &exc) == 0 && exc == 0 &&
+                vp->readInt32(reply_buf, &h) == 0 && h > 0) {
+                ret_handle = h;
+                vp->active_handle = h;
+                vp->boost_ok++;
+            } else {
+                vp->boost_fail++;
+            }
+        } else {
+            vp->boost_fail++;
+            /* Reset stale binder on dead object (-32 / EPIPE) */
+            if (st == -32) {
+                vp->vperf_binder = NULL;
+                vp->active_handle = 0;
+            }
+        }
+    }
+
+    vp->parcelDtor(reply_buf);
+    vp->parcelDtor(data_buf);
+    return ret_handle;
+}
+
+static void vperf_release_active(VPerfClient* vp) {
+    if (!vp->ready || !vp->vperf_binder || vp->active_handle <= 0) return;
+
+    uint64_t data_buf[64]  __attribute__((aligned(16)));
+    uint64_t reply_buf[64] __attribute__((aligned(16)));
+    memset(data_buf, 0, sizeof(data_buf));
+    memset(reply_buf, 0, sizeof(reply_buf));
+    vp->parcelCtor(data_buf);
+    vp->parcelCtor(reply_buf);
+
+    size_t vec_parent = 0, vec_child = 0;
+    int32_t reserved_vals[2] = { 0, 0 };
+    HidlVecI32 reserved_vec = { reserved_vals, 0u, 0u };
+
+    int32_t st = vp->writeToken(data_buf, VPERF_INTERFACE_NAME);
+    if (st == 0) st = vp->writeInt32(data_buf, vp->active_handle);
+    if (st == 0) st = vp->writeBuffer(data_buf, &reserved_vec, sizeof(reserved_vec), &vec_parent);
+    if (st == 0) st = vp->writeEmbBuf(data_buf, reserved_vals, 0, &vec_child, vec_parent, 0);
+    if (st == 0) {
+        HidlReplyCb cb;
+        memset(&cb, 0, sizeof(cb));
+        (void)vp->transact(vp->vperf_binder, VPERF_TX_LOCK_RELEASE, data_buf, reply_buf, 0, &cb);
+    }
+    vp->active_handle = 0;
+    vp->parcelDtor(reply_buf);
+    vp->parcelDtor(data_buf);
 }
 
 /* ---- Sysfs, Netlink UEvent & Input Helpers ---- */
@@ -479,7 +717,65 @@ static int patch_vendor_hal(const char* src_path, const char* dst_path) {
     return 0;
 }
 
-/* ---- UDFPS State Machine ---- */
+/* ---- Deterministic Vendor Composer HAL Patcher (5 Unique RM692H5 HWC Configs + Groups) ---- */
+static int patch_vendor_composer(const char* src_path, const char* dst_path) {
+    FILE* f = fopen(src_path, "rb");
+    if (!f) { fprintf(stderr, "[neo9-composer] open %s failed: %s\n", src_path, strerror(errno)); return 1; }
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (sz < 0x89000 || sz > 4 * 1024 * 1024) { fclose(f); return 2; }
+    uint8_t* buf = (uint8_t*)malloc((size_t)sz);
+    if (!buf) { fclose(f); return 3; }
+    if (fread(buf, 1, (size_t)sz, f) != (size_t)sz) { free(buf); fclose(f); return 4; }
+    fclose(f);
+
+    Elf64_Ehdr* eh = (Elf64_Ehdr*)buf;
+    if (memcmp(eh->e_ident, ELFMAG, SELFMAG) != 0 || eh->e_machine != EM_AARCH64) { free(buf); return 5; }
+
+    /* Verify exact PD2338 composer instructions before patching:
+     *   0x7ee08: 3952c2a8  ldrb w8, [x21, #0x4b0]
+     *   0x7ee0c: 35000268  cbnz w8, 0x7ee58         -> b 0x7ee58      (0x14000013)
+     *   0x7f438: 3952c009  ldrb w9, [x0, #0x4b0]
+     *   0x7f468: 340007a9  cbz  w9, 0x7f55c         -> nop            (0xd503201f)
+     *   0x883a0: 7100005f  cmp  w2, #0              -> cmp x21, #0x1  (0xf10006bf)
+     *   0x883a4: 1a9f17e5  cset w5, eq
+     */
+    uint32_t insn_7ee08 = 0, insn_7ee0c = 0, insn_7f438 = 0, insn_7f468 = 0;
+    uint32_t insn_883a0 = 0, insn_883a4 = 0;
+    memcpy(&insn_7ee08, buf + 0x7ee08, 4);
+    memcpy(&insn_7ee0c, buf + 0x7ee0c, 4);
+    memcpy(&insn_7f438, buf + 0x7f438, 4);
+    memcpy(&insn_7f468, buf + 0x7f468, 4);
+    memcpy(&insn_883a0, buf + 0x883a0, 4);
+    memcpy(&insn_883a4, buf + 0x883a4, 4);
+    if (insn_7ee08 != 0x3952c2a8U || insn_7ee0c != 0x35000268U ||
+        insn_7f438 != 0x3952c009U || insn_7f468 != 0x340007a9U ||
+        insn_883a0 != 0x7100005fU || insn_883a4 != 0x1a9f17e5U) {
+        fprintf(stderr, "[neo9-composer] instruction mismatch: %08x %08x %08x %08x %08x %08x\n",
+                insn_7ee08, insn_7ee0c, insn_7f438, insn_7f468, insn_883a0, insn_883a4);
+        free(buf);
+        return 6;
+    }
+
+    uint32_t patch_7ee0c = 0x14000013U; /* b 0x7ee58 */
+    uint32_t patch_7f468 = 0xd503201fU; /* nop */
+    uint32_t patch_883a0 = 0xf10006bfU; /* cmp x21, #0x1 (keep LTPO configs + 144Hz config 1) */
+    memcpy(buf + 0x7ee0c, &patch_7ee0c, 4);
+    memcpy(buf + 0x7f468, &patch_7f468, 4);
+    memcpy(buf + 0x883a0, &patch_883a0, 4);
+
+    FILE* out = fopen(dst_path, "wb");
+    if (!out) { free(buf); return 7; }
+    if (fwrite(buf, 1, (size_t)sz, out) != (size_t)sz) { fclose(out); free(buf); return 8; }
+    fclose(out);
+    free(buf);
+    chmod(dst_path, 0755);
+    fprintf(stderr, "[neo9-composer] patched PD2338 composer HAL (5 unique configs: 60/72/90/120 LTPO + 144Hz) at %s\n", dst_path);
+    return 0;
+}
+
+/* ---- UDFPS & RM692H5 8T LTPO State Machine ---- */
 typedef struct {
     bool finger_down;
     bool lhbm_on;
@@ -491,13 +787,187 @@ typedef struct {
     bool down_from_vts;
     bool hbm_notify_armed;
     int display_on;
+    int ltpo_tier;
+    int ltpo_last_auto_mode;
     int64_t bl_zero_since_ms;
     int64_t display_off_time_ms;
     int64_t fast_poll_until_ms;
     int64_t down_time_ms;
     int64_t wake_press_ms;
+    int64_t last_ltpo_sync_ms;
+    int64_t settings_sync_due_ms;
+    int64_t last_refresh_retry_ms;
+    uint8_t last_peak_sig[PEAK_SIG_LEN];
+    bool has_peak_sig;
+    bool initial_refresh_synced;
     int saved_bl;
+    /* Touch/Scroll VPerf Boost state (screen-on only, auto-expiring via libqti-perfd) */
+    bool touch_down;
+    bool touch_moved;
+    bool touch_have_start;
+    int touch_start_x;
+    int touch_start_y;
+    int touch_cur_x;
+    int touch_cur_y;
+    int64_t last_scroll_boost_ms;
+    VPerfClient vperf;
 } UdfpsState;
+
+static int init_settings_inotify(void) {
+    int fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+    if (fd < 0) return -1;
+    if (inotify_add_watch(fd, SETTINGS_USER0_DIR, IN_CLOSE_WRITE | IN_MOVED_TO) < 0) {
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+static bool read_peak_abx_sig(uint8_t out[PEAK_SIG_LEN]) {
+    int fd = open(SETTINGS_SYSTEM_XML, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return false;
+    const size_t max_sz = 512 * 1024;
+    uint8_t* buf = (uint8_t*)malloc(max_sz);
+    if (!buf) { close(fd); return false; }
+    size_t total = 0;
+    while (total < max_sz) {
+        ssize_t n = read(fd, buf + total, max_sz - total);
+        if (n <= 0) break;
+        total += (size_t)n;
+    }
+    close(fd);
+
+    const uint8_t* hit = (const uint8_t*)memmem(buf, total, "peak_refresh_rate", 17);
+    if (!hit) {
+        free(buf);
+        return false;
+    }
+    size_t rem = (size_t)((buf + total) - hit);
+    size_t copy_len = (rem < PEAK_SIG_LEN) ? rem : PEAK_SIG_LEN;
+    memset(out, 0, PEAK_SIG_LEN);
+    memcpy(out, hit, copy_len);
+    free(buf);
+    return true;
+}
+
+static bool read_setting_float_ns(const char* ns, const char* key, float* out_val) {
+    char cmd[128];
+    snprintf(cmd, sizeof(cmd), "/system/bin/settings --user current get %s %s 2>/dev/null", ns, key);
+    FILE* fp = popen(cmd, "r");
+    if (!fp) return false;
+    char buf[64] = {0};
+    bool got = fgets(buf, sizeof(buf), fp) != NULL;
+    pclose(fp);
+    if (!got || strstr(buf, "null") != NULL) return false;
+    char* endp = NULL;
+    float v = strtof(buf, &endp);
+    if (endp == buf) return false;
+    *out_val = v;
+    return true;
+}
+
+static bool read_setting_float(const char* key, float* out_val) {
+    return read_setting_float_ns("system", key, out_val);
+}
+
+static bool write_setting_str_ns(const char* ns, const char* key, const char* val) {
+    int pfd[2];
+    if (pipe(pfd) < 0) return false;
+    fcntl(pfd[0], F_SETFD, FD_CLOEXEC);
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        close(pfd[0]);
+        close(pfd[1]);
+        return false;
+    }
+    if (pid == 0) {
+        close(pfd[0]);
+        /* Keep pfd[1] open across exec so parent's read() blocks until settings exits */
+        int dn = open("/dev/null", O_RDWR);
+        if (dn >= 0) {
+            dup2(dn, STDIN_FILENO);
+            dup2(dn, STDOUT_FILENO);
+            dup2(dn, STDERR_FILENO);
+            if (dn > 2) close(dn);
+        }
+        execl("/system/bin/settings", "settings", "--user", "current",
+              "put", ns, key, val, (char*)NULL);
+        _exit(127);
+    }
+    close(pfd[1]);
+    char dummy;
+    while (read(pfd[0], &dummy, 1) < 0 && errno == EINTR) {}
+    close(pfd[0]);
+    return true;
+}
+
+static bool write_setting_str(const char* key, const char* val) {
+    return write_setting_str_ns("system", key, val);
+}
+
+static bool write_secure_setting_str(const char* key, const char* val) {
+    return write_setting_str_ns("secure", key, val);
+}
+
+static void sync_refresh_rate_lock(UdfpsState* st, bool force) {
+    uint8_t sig[PEAK_SIG_LEN];
+    bool sig_ok = read_peak_abx_sig(sig);
+    if (!force && st->initial_refresh_synced && sig_ok && st->has_peak_sig &&
+        memcmp(sig, st->last_peak_sig, PEAK_SIG_LEN) == 0) {
+        return;
+    }
+    if (sig_ok) {
+        memcpy(st->last_peak_sig, sig, PEAK_SIG_LEN);
+        st->has_peak_sig = true;
+    }
+
+    float ext_v = 0.0f;
+    if (read_setting_float("extreme_refresh_rate", &ext_v) && ext_v > 0.5f) {
+        write_setting_str("extreme_refresh_rate", "0");
+        logi("REFRESH_SYNC: cleared stale extreme_refresh_rate=1 -> 0");
+    }
+
+    float peak = 0.0f;
+    if (!read_setting_float("peak_refresh_rate", &peak) || peak < 55.0f || peak > 150.0f) {
+        if (!st->initial_refresh_synced) {
+            float sb = 0.0f;
+            if (!read_setting_float("screen_brightness", &sb)) {
+                return; /* SettingsProvider not ready yet; retry cleanly */
+            }
+            write_setting_str("peak_refresh_rate", "120.0");
+            write_setting_str("min_refresh_rate", "120.0");
+            float mcfr = 0.0f;
+            if (!read_setting_float_ns("secure", "match_content_frame_rate", &mcfr)) {
+                write_secure_setting_str("match_content_frame_rate", "2");
+            }
+            st->initial_refresh_synced = true;
+            logi("REFRESH_SYNC: init default peak=120.0 min=120.0");
+        }
+        return;
+    }
+    float min_hz = 0.0f;
+    bool min_ok = read_setting_float("min_refresh_rate", &min_hz);
+    float diff = min_hz - peak;
+    bool wrote_min = false;
+    if (!min_ok || diff > 0.5f || diff < -0.5f) {
+        char val[16];
+        snprintf(val, sizeof(val), "%.1f", peak);
+        wrote_min = write_setting_str("min_refresh_rate", val);
+        logi("REFRESH_SYNC: peak=%.1f -> min=%s (prev_min=%.1f)",
+             peak, val, min_ok ? min_hz : -1.0f);
+    }
+    if (!st->initial_refresh_synced) {
+        float mcfr = 0.0f;
+        if (!read_setting_float_ns("secure", "match_content_frame_rate", &mcfr)) {
+            write_secure_setting_str("match_content_frame_rate", "2");
+        }
+        st->initial_refresh_synced = true;
+        if (!wrote_min) {
+            logi("REFRESH_SYNC: boot synced peak=%.1f min=%.1f", peak, min_ok ? min_hz : peak);
+        }
+    }
+}
 
 static void arm_screen_off_fp(UdfpsState* st, const char* reason) {
     if (st->screen_off_armed) return;
@@ -580,19 +1050,79 @@ static void handle_finger_up(BinderApi* api, AIBinder* ext, UdfpsState* st, cons
     logi("UP (%s): lhbm_off(ok=%d) cmd32534(1) st=%d ret=%d", reason, hbm_ok ? 1 : 0, bs, ret);
 }
 
+static bool read_ltpo_status(int* out_auto_mode, int* out_min_fps) {
+    int fd = open(SYSFS_LTPO_MODE, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return false;
+    char buf[192];
+    ssize_t n = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    if (n <= 0) return false;
+    buf[n] = '\0';
+    const char* pa = strstr(buf, "auto_mode=");
+    const char* pm = strstr(buf, "ltpo_min_fps=");
+    if (!pa || !pm) return false;
+    *out_auto_mode = (int)strtol(pa + 10, NULL, 10);
+    *out_min_fps = (int)strtol(pm + 13, NULL, 10);
+    return true;
+}
+
+static void sync_ltpo_policy(UdfpsState* st, int bl, int64_t now, bool force) {
+    if (st->display_on != 1 || bl <= 0 || st->finger_down || st->lhbm_on) return;
+    if (!force && (now - st->last_ltpo_sync_ms) < LTPO_SYNC_INTERVAL_MS) return;
+    st->last_ltpo_sync_ms = now;
+
+    int auto_mode = -1, cur_min_fps = -1;
+    if (!read_ltpo_status(&auto_mode, &cur_min_fps)) return;
+    if (auto_mode != 1) {
+        if (st->ltpo_last_auto_mode != 0) {
+            logi("LTPO: auto_mode=%d (non-LTPO mode e.g. 144Hz), pausing writes", auto_mode);
+        }
+        st->ltpo_last_auto_mode = 0;
+        st->ltpo_tier = -1;
+        return;
+    }
+
+    int tier;
+    if (st->ltpo_tier == 2) {
+        tier = (bl >= LTPO_BL_HIGH_OFF) ? 2 : ((bl >= LTPO_BL_MID_ON) ? 1 : 0);
+    } else if (st->ltpo_tier == 1) {
+        tier = (bl >= LTPO_BL_HIGH_ON) ? 2 : ((bl >= LTPO_BL_MID_OFF) ? 1 : 0);
+    } else {
+        tier = (bl >= LTPO_BL_HIGH_ON) ? 2 : ((bl >= LTPO_BL_MID_ON) ? 1 : 0);
+    }
+
+    const char* profile = (tier == 2) ? "30-5-5-1-3-8-3"
+                        : (tier == 1) ? "30-20-10-5"
+                                      : "30-20-10";
+    int target_min = (tier == 2) ? 1 : ((tier == 1) ? 5 : 10);
+
+    if (force || st->ltpo_last_auto_mode != 1 || tier != st->ltpo_tier || cur_min_fps != target_min) {
+        bool ok = write_sysfs_str(SYSFS_LTPO_MODE, profile);
+        logi("LTPO: bl=%d auto_mode=1 -> tier=%d (%s, min=%dHz, prev_min=%dHz, ok=%d)",
+             bl, tier, profile, target_min, cur_min_fps, ok ? 1 : 0);
+        st->ltpo_tier = tier;
+        st->ltpo_last_auto_mode = 1;
+    }
+}
+
 static void sync_display_state(UdfpsState* st, int64_t now) {
     int bl = read_display_bl();
     if (bl < 0) return;
 
     if (bl > 0) {
         st->bl_zero_since_ms = 0;
+        bool just_turned_on = false;
         /* Hold VTS in gesture mode while a screen-off capture is in flight (LHBM raises bl_level=~956) */
         if (st->display_on != 1 && !(st->finger_down && st->down_from_vts)) {
             st->display_on = 1;
+            just_turned_on = true;
             disarm_screen_off_fp(st, "dispOn");
             set_vts_lcd_state(true);
             logi("DISPLAY_ON: bl=%d -> vts_lcd=1 (lcd_on=%d session=%d)",
                  bl, read_sysfs_int(SYSFS_VTS_LCD_ON), st->session_active ? 1 : 0);
+        }
+        if (st->display_on == 1) {
+            sync_ltpo_policy(st, bl, now, just_turned_on);
         }
     } else if (st->display_on != 0 && !st->finger_down && !st->wake_pending) {
         int64_t debounce = is_panel_dpms_on() ? DISPLAY_OFF_DEBOUNCE_MS : DISPLAY_OFF_DEBOUNCE_DPMS;
@@ -601,6 +1131,7 @@ static void sync_display_state(UdfpsState* st, int64_t now) {
         } else if ((now - st->bl_zero_since_ms) >= debounce) {
             st->display_on = 0;
             st->display_off_time_ms = now;
+            st->ltpo_tier = -1;
             /* Stock OriginOS parity: ONLY arm VTS FP gesture + kernel hbm_notify when an
              * active authenticate() session exists; otherwise keep GT9916 in deep sleep! */
             if (st->session_active) {
@@ -771,25 +1302,35 @@ static int run_daemon(BinderApi* api) {
 
     char vfp_path[64] = {0}, ts_path[64] = {0}, fp_path[64] = {0}, pwr_path[64] = {0};
     int uev_fd     = init_uevent_socket();
+    int ino_fd     = init_settings_inotify();
     int vivo_fp_fd = open_input_by_name("vivo_fp", vfp_path, sizeof(vfp_path));
     int vts_ts_fd  = open_input_by_name("vivo_ts", ts_path, sizeof(ts_path));
     int vts_fp_fd  = open_input_by_name("vivo_ts_fp", fp_path, sizeof(fp_path));
     int pwr_fd     = open_input_by_name("pmic_pwrkey", pwr_path, sizeof(pwr_path));
     int uinput_fd  = init_uinput_wakeup();
-    logi("fds: uevent=%d vivo_fp=%s(%d) vivo_ts=%s(%d) vivo_ts_fp=%s(%d) pwr=%s(%d) uinput=%d",
-         uev_fd,
+    logi("fds: uevent=%d inotify=%d vivo_fp=%s(%d) vivo_ts=%s(%d) vivo_ts_fp=%s(%d) pwr=%s(%d) uinput=%d",
+         uev_fd, ino_fd,
          vivo_fp_fd >= 0 ? vfp_path : "none", vivo_fp_fd,
          vts_ts_fd >= 0 ? ts_path : "none", vts_ts_fd,
          vts_fp_fd >= 0 ? fp_path : "none", vts_fp_fd,
          pwr_fd >= 0 ? pwr_path : "none", pwr_fd, uinput_fd);
 
     UdfpsState st = {0};
-    st.display_on = (read_display_bl() != 0) ? 1 : 0;
+    st.ltpo_tier = -1;
+    st.ltpo_last_auto_mode = -1;
+    vperf_init(&st.vperf);
+    int init_bl = read_display_bl();
+    st.display_on = (init_bl > 0) ? 1 : 0;
     /* Start disarmed until HAL actually starts an authenticate() session */
     set_hbm_notify_enable(false);
     disable_vts_screen_off_fp();
     set_vts_lcd_state(st.display_on != 0);
     int64_t last_disp_poll_ms = now_ms();
+    if (st.display_on == 1) {
+        sync_ltpo_policy(&st, init_bl, last_disp_poll_ms, true);
+    }
+    sync_refresh_rate_lock(&st, true);
+    st.last_refresh_retry_ms = last_disp_poll_ms;
 
     while (!g_stop) {
         FILE* lp = popen("/system/bin/logcat -b main -v tag -T 1", "r");
@@ -803,10 +1344,12 @@ static int run_daemon(BinderApi* api) {
         bool log_eof = false;
 
         while (!g_stop && !log_eof) {
-            struct pollfd pfds[6];
+            struct pollfd pfds[7];
             int nfds = 0;
             int idx_uev = (uev_fd >= 0) ? nfds++ : -1;
             if (idx_uev >= 0) pfds[idx_uev] = (struct pollfd){ .fd = uev_fd, .events = POLLIN };
+            int idx_ino = (ino_fd >= 0) ? nfds++ : -1;
+            if (idx_ino >= 0) pfds[idx_ino] = (struct pollfd){ .fd = ino_fd, .events = POLLIN };
             int idx_log = nfds++; pfds[idx_log] = (struct pollfd){ .fd = log_fd, .events = POLLIN };
             int idx_vfp = (vivo_fp_fd >= 0) ? nfds++ : -1;
             if (idx_vfp >= 0) pfds[idx_vfp] = (struct pollfd){ .fd = vivo_fp_fd, .events = POLLIN };
@@ -830,6 +1373,30 @@ static int run_daemon(BinderApi* api) {
                 handle_uevent_fd(api, &ext, &st, uev_fd);
             }
 
+            if (idx_ino >= 0 && (pfds[idx_ino].revents & POLLIN)) {
+                char ibuf[2048] __attribute__((aligned(__alignof__(struct inotify_event))));
+                for (;;) {
+                    ssize_t n = read(ino_fd, ibuf, sizeof(ibuf));
+                    if (n <= 0) break;
+                    ssize_t off = 0;
+                    while (off + (ssize_t)sizeof(struct inotify_event) <= n) {
+                        const struct inotify_event* ev = (const struct inotify_event*)(ibuf + off);
+                        if (ev->len > 0 && strcmp(ev->name, "settings_system.xml") == 0) {
+                            st.settings_sync_due_ms = now + SETTINGS_DEBOUNCE_MS;
+                        }
+                        off += (ssize_t)sizeof(struct inotify_event) + (ssize_t)ev->len;
+                    }
+                }
+            }
+            if (st.settings_sync_due_ms != 0 && now >= st.settings_sync_due_ms) {
+                st.settings_sync_due_ms = 0;
+                sync_refresh_rate_lock(&st, false);
+            }
+            if (!st.initial_refresh_synced && (now - st.last_refresh_retry_ms) >= 2000) {
+                st.last_refresh_retry_ms = now;
+                sync_refresh_rate_lock(&st, true);
+            }
+
             if (idx_pwr >= 0 && (pfds[idx_pwr].revents & POLLIN)) {
                 struct input_event ev;
                 while (read(pwr_fd, &ev, sizeof(ev)) == (ssize_t)sizeof(ev)) {
@@ -841,6 +1408,9 @@ static int run_daemon(BinderApi* api) {
                 (st.display_on == 0 && pr > 0 && (now - last_disp_poll_ms) >= 20) ||
                 (now - last_disp_poll_ms) >= 150) {
                 sync_display_state(&st, now);
+                if (st.display_on == 0 && st.vperf.active_handle > 0) {
+                    vperf_release_active(&st.vperf);
+                }
                 last_disp_poll_ms = now;
             }
 
@@ -855,10 +1425,74 @@ static int run_daemon(BinderApi* api) {
 
             if (idx_ts >= 0 && (pfds[idx_ts].revents & POLLIN)) {
                 struct input_event ev;
+                bool ts_down_edge = false, ts_up_edge = false, ts_moved_edge = false;
                 while (read(vts_ts_fd, &ev, sizeof(ev)) == (ssize_t)sizeof(ev)) {
                     if (ev.type == EV_KEY && ev.code == KEY_VTS_FP_DETECT) {
                         handle_vts_fp_key(api, &ext, &st, ev.value != 0, ev.value ? "vts_ts" : "vts_ts_up", now);
+                    } else if (st.display_on == 1) {
+                        if (ev.type == EV_KEY && ev.code == BTN_TOUCH) {
+                            if (ev.value != 0) {
+                                st.touch_down = true;
+                                st.touch_moved = false;
+                                st.touch_have_start = false;
+                                ts_down_edge = true;
+                            } else {
+                                st.touch_down = false;
+                                ts_up_edge = true;
+                            }
+                        } else if (ev.type == EV_ABS && st.touch_down) {
+                            if (ev.code == ABS_MT_POSITION_X) {
+                                if (!st.touch_have_start) st.touch_start_x = ev.value;
+                                st.touch_cur_x = ev.value;
+                            } else if (ev.code == ABS_MT_POSITION_Y) {
+                                if (!st.touch_have_start) {
+                                    st.touch_start_y = ev.value;
+                                    st.touch_have_start = true;
+                                }
+                                st.touch_cur_y = ev.value;
+                                int dx = st.touch_cur_x - st.touch_start_x;
+                                int dy = st.touch_cur_y - st.touch_start_y;
+                                if (dx < 0) dx = -dx;
+                                if (dy < 0) dy = -dy;
+                                if (dx + dy >= VPERF_MOVE_THRESH_PX) {
+                                    st.touch_moved = true;
+                                    ts_moved_edge = true;
+                                }
+                            }
+                        }
                     }
+                }
+                if (st.display_on == 1 && st.vperf.ready) {
+                    int32_t prev_h = ((now - st.last_scroll_boost_ms) < 1200) ? st.vperf.active_handle : 0;
+                    if (ts_down_edge && !ts_moved_edge) {
+                        if ((now - st.last_scroll_boost_ms) >= 80) {
+                            vperf_hint_acq_rel(&st.vperf, prev_h,
+                                               QTI_HINT_SCROLL_BOOST, VPERF_TOUCH_DOWN_MS,
+                                               QTI_SCROLL_TYPE_LIGHT, now);
+                            st.last_scroll_boost_ms = now;
+                            prev_h = st.vperf.active_handle;
+                        }
+                    }
+                    if (ts_moved_edge) {
+                        if ((now - st.last_scroll_boost_ms) >= VPERF_DRAG_RENEW_MS) {
+                            vperf_hint_acq_rel(&st.vperf, prev_h,
+                                               QTI_HINT_SCROLL_BOOST, VPERF_DRAG_BOOST_MS,
+                                               QTI_SCROLL_TYPE_VERTICAL, now);
+                            st.last_scroll_boost_ms = now;
+                            prev_h = st.vperf.active_handle;
+                        }
+                    }
+                    if (ts_up_edge) {
+                        int32_t dur = st.touch_moved ? VPERF_FLING_BOOST_MS : VPERF_TAP_OPEN_MS;
+                        int32_t typ = st.touch_moved ? QTI_SCROLL_TYPE_VERTICAL : QTI_SCROLL_TYPE_LIGHT;
+                        vperf_hint_acq_rel(&st.vperf, prev_h,
+                                           QTI_HINT_SCROLL_BOOST, dur, typ, now);
+                        st.last_scroll_boost_ms = now;
+                        st.touch_moved = false;
+                        st.touch_have_start = false;
+                    }
+                } else if (st.display_on == 0 && st.vperf.active_handle > 0) {
+                    vperf_release_active(&st.vperf);
                 }
             }
 
@@ -940,10 +1574,12 @@ static int run_daemon(BinderApi* api) {
     }
 
     if (st.finger_down && ext) handle_finger_up(api, ext, &st, "shutdown");
+    vperf_release_active(&st.vperf);
     set_hbm_notify_enable(false);
     disable_vts_screen_off_fp();
     set_vts_lcd_state(true);
     if (uev_fd >= 0) close(uev_fd);
+    if (ino_fd >= 0) close(ino_fd);
     if (vivo_fp_fd >= 0) close(vivo_fp_fd);
     if (vts_ts_fd >= 0) close(vts_ts_fd);
     if (vts_fp_fd >= 0) close(vts_fp_fd);
@@ -958,8 +1594,24 @@ int main(int argc, char** argv) {
         log_init(false);
         return patch_vendor_hal(argv[2], argv[3]);
     }
+    if (argc == 4 && strcmp(argv[1], "--patch-composer") == 0) {
+        log_init(false);
+        return patch_vendor_composer(argv[2], argv[3]);
+    }
+    if (argc == 2 && strcmp(argv[1], "--test-vperf") == 0) {
+        log_init(false);
+        VPerfClient vp;
+        if (!vperf_init(&vp)) return 1;
+        int32_t h1 = vperf_hint_acq_rel(&vp, 0, QTI_HINT_SCROLL_BOOST, 400, QTI_SCROLL_TYPE_VERTICAL, 0);
+        int32_t h2 = vperf_hint_acq_rel(&vp, h1 > 0 ? h1 : 0, QTI_HINT_SCROLL_BOOST, 300, QTI_SCROLL_TYPE_LIGHT, 0);
+        printf("IVPerf@1.0 test: binder=%p h1=%d h2=%d ok=%llu fail=%llu\n",
+               vp.vperf_binder, h1, h2,
+               (unsigned long long)vp.boost_ok, (unsigned long long)vp.boost_fail);
+        vperf_release_active(&vp);
+        return (h1 > 0 && h2 > 0) ? 0 : 2;
+    }
     log_init(argc == 1);
-    if (argc == 1) logi("daemon started pid=%d uid=%d (stock-native v17)", (int)getpid(), (int)getuid());
+    if (argc == 1) logi("daemon started pid=%d uid=%d (stock-native v18)", (int)getpid(), (int)getuid());
 
     BinderApi api;
     if (!binder_api_init(&api)) return 1;

@@ -31,6 +31,8 @@ VIVO_VCS_LIB="$KIT_DIR/camera/libvivocameraservice.so"
 VIVO_VCS_COMP="$KIT_DIR/camera/libvivo_vcs_comp.so"
 VIVO_CAM_HOOK="$KIT_DIR/camera/libneo9_cam_hook.so"
 VIVO_CAM_PATCH_PY="$KIT_DIR/camera/patch_cameraserver.py"
+SF_EPT_HOOK="$KIT_DIR/display/libneo9_sf_hook.so"
+SF_PATCH_PY="$KIT_DIR/display/patch_surfaceflinger.py"
 OVERLAY_CERT_DER="$KIT_DIR/overlay/neo9_overlay_cert.der"
 AVBFORGE_CORE="$(pm path io.github.fu.avbforge | sed 's/package://;s|base.apk|lib/arm64/libavbforge_core.so|')"
 
@@ -150,7 +152,7 @@ EOF
     chmod 0644 "$SE_CIL"
 fi
 
-# 3b. Install native static RRO Overlays (UDFPS/Display + Settings ColorModes + CAF IMS Phone + CarrierConfig + Aperture)
+# 3b. Install native static RRO Overlays (UDFPS/Display + Settings ColorModes/RefreshRate + CAF IMS Phone + CarrierConfig + Aperture)
 for ov in "$OVERLAY_APK" "$SETTINGS_OVERLAY" "$CAFIMS_PHONE_OVERLAY" "$CARRIER_CFG_OVERLAY" "$APERTURE_OVERLAY"; do
     if [ -f "$ov" ]; then
         b="$(basename "$ov")"
@@ -160,6 +162,42 @@ for ov in "$OVERLAY_APK" "$SETTINGS_OVERLAY" "$CAFIMS_PHONE_OVERLAY" "$CARRIER_C
         chcon u:object_r:system_file:s0 "$MNT/system/product/overlay/$b"
     fi
 done
+
+# 3b0a. Patch Neo9SettingsOverlay.apk with target Settings.apk's screen_refresh_rate.xml
+# (stripped of min_refresh_rate & extreme_refresh_rate -> single OriginOS-style selector) and verify via idmap2
+if [ -f "$MNT/system/system_ext/priv-app/Settings/Settings.apk" ] && \
+   [ -f "$MNT/system/product/overlay/Neo9SettingsOverlay.apk" ]; then
+    echo "[3b0a] Patching Neo9SettingsOverlay.apk refresh-rate screen & verifying via idmap2..."
+    PATH="/data/data/com.termux/files/usr/bin:$PATH" \
+    /data/data/com.termux/files/usr/bin/python3 "$KIT_DIR/overlay/patch_settings_overlay_xml.py" \
+        "$MNT/system/system_ext/priv-app/Settings/Settings.apk" \
+        "$MNT/system/product/overlay/Neo9SettingsOverlay.apk"
+    chmod 0644 "$MNT/system/product/overlay/Neo9SettingsOverlay.apk"
+    chown 0:0 "$MNT/system/product/overlay/Neo9SettingsOverlay.apk"
+    chcon u:object_r:system_file:s0 "$MNT/system/product/overlay/Neo9SettingsOverlay.apk"
+
+    IDMAP_TMP="/data/local/tmp/neo9_settings_idmap"
+    rm -f "$IDMAP_TMP"
+    LD_LIBRARY_PATH="$MNT/system/lib64" "$MNT/system/bin/idmap2" create \
+        --target-apk-path "$MNT/system/system_ext/priv-app/Settings/Settings.apk" \
+        --overlay-apk-path "$MNT/system/product/overlay/Neo9SettingsOverlay.apk" \
+        --idmap-path "$IDMAP_TMP"
+    IDMAP_DUMP="$(LD_LIBRARY_PATH="$MNT/system/lib64" "$MNT/system/bin/idmap2" dump --idmap-path "$IDMAP_TMP")"
+    printf '%s\n' "$IDMAP_DUMP" | grep -E "screen_refresh_rate|max_refresh_rate_title|extreme_refresh_rate_summary|config_color_mode_options"
+    printf '%s\n' "$IDMAP_DUMP" | grep -q "screen_refresh_rate" || { echo "FATAL: screen_refresh_rate missing in idmap2!" >&2; rm -f "$IDMAP_TMP"; exit 1; }
+    printf '%s\n' "$IDMAP_DUMP" | grep -q "max_refresh_rate_title" || { echo "FATAL: max_refresh_rate_title missing in idmap2!" >&2; rm -f "$IDMAP_TMP"; exit 1; }
+    printf '%s\n' "$IDMAP_DUMP" | grep -q "extreme_refresh_rate_summary" || { echo "FATAL: extreme_refresh_rate_summary missing in idmap2!" >&2; rm -f "$IDMAP_TMP"; exit 1; }
+    rm -f "$IDMAP_TMP"
+
+    XML_TREE="$(/data/data/com.termux/files/usr/bin/aapt dump xmltree "$MNT/system/product/overlay/Neo9SettingsOverlay.apk" res/xml/screen_refresh_rate.xml)"
+    printf '%s\n' "$XML_TREE" | grep -q "com.android.settingslib.widget.FooterPreference" || { echo "FATAL: FooterPreference missing in patched screen_refresh_rate.xml!" >&2; exit 1; }
+    printf '%s\n' "$XML_TREE" | grep -q "peak_refresh_rate" || { echo "FATAL: peak_refresh_rate missing in patched screen_refresh_rate.xml!" >&2; exit 1; }
+    printf '%s\n' "$XML_TREE" | grep -q "per_app_refresh_rate" || { echo "FATAL: per_app_refresh_rate missing in patched screen_refresh_rate.xml!" >&2; exit 1; }
+    if printf '%s\n' "$XML_TREE" | grep -Eq "min_refresh_rate|extreme_refresh_rate"; then
+        echo "FATAL: stripped preference key still present in patched screen_refresh_rate.xml!" >&2
+        exit 1
+    fi
+fi
 
 # 3b0. Stage PD2338 RM692H5 QDCM display calibration JSON into /system_ext/etc/ for DSU boots
 # Under DSU, first_stage_mount does NOT mount the host /oem erofs partition, leaving /oem empty so
@@ -409,6 +447,21 @@ VCSRC
     rm -f "$MNT/system/bin/neo9-cam-diag.sh"
 fi
 
+# 3b6. Install Module 4 Stock OriginOS 4 SurfaceFlinger 360Hz-TE EPT bridge (libneo9_sf_hook.so)
+rm -f "$MNT/system/system_ext/lib64/libneo9_displaydebug.so"
+if [ -f "$SF_EPT_HOOK" ] && [ -f "$SF_PATCH_PY" ]; then
+    echo "[3b6] Installing libneo9_sf_hook.so and hooking /system/bin/surfaceflinger (real EPT -> 0x10020002)..."
+    rm -f "$MNT/system/lib64/libneo9_sf_hook.so"
+    cp -a "$MNT/system/lib64/libpowermanager.so" "$MNT/system/lib64/libneo9_sf_hook.so"
+    cat "$SF_EPT_HOOK" > "$MNT/system/lib64/libneo9_sf_hook.so"
+    chmod 0644 "$MNT/system/lib64/libneo9_sf_hook.so"
+    chown 0:0 "$MNT/system/lib64/libneo9_sf_hook.so"
+    /data/data/com.termux/files/usr/bin/python3 "$SF_PATCH_PY" "$MNT/system/bin/surfaceflinger"
+    chmod 0755 "$MNT/system/bin/surfaceflinger"
+    chown 0:2000 "$MNT/system/bin/surfaceflinger"
+    ls -lZ "$MNT/system/lib64/libneo9_sf_hook.so" "$MNT/system/bin/surfaceflinger"
+fi
+
 # 3c. Inject/refresh early post-fs HAL SensorLocation & telephony hook in rw-system.sh (preserve phhsu_exec xattr!)
 RW_SH="$MNT/system/bin/rw-system.sh"
 if grep -q "# NEO9_UDFPS_HOOK:" "$RW_SH"; then
@@ -479,27 +532,48 @@ if getprop ro.vendor.build.fingerprint | grep -qi "vivo/PD2338"; then
     /system/bin/resetprop_phh ro.vendor.perf-hal.ver 2.3
     /system/bin/resetprop_phh ro.media.xml_variant.codecs_performance _kalama
     /system/bin/resetprop_phh ro.media.recorder-max-base-layer-fps 60
-    # Match OriginOS 4 SurfaceFlinger dynamic refresh-rate (auto-drops to 60Hz on 30fps viewfinder!),
-    # Display-P3 wide color management (fixes viewfinder color/WB parity), and 120Hz frame pacing
-    /system/bin/resetprop_phh ro.surface_flinger.use_content_detection_for_refresh_rate true
-    /system/bin/resetprop_phh ro.surface_flinger.set_touch_timer_ms 200
+    # Disable A17 software FrameRateOverride / Toolkit FrameRateCategory / ContentDetection 60Hz throttling
+    # on 120Hz (120 = 2x60 allows SurfaceFlinger to throttle Settings/Security & privacy to 60fps while 144Hz is immune;
+    # RM692H5 hardware 8T LTPO auto_mode=1 natively drops static frames to 1/5/10Hz without SF software heuristics).
+    /system/bin/resetprop_phh ro.surface_flinger.use_content_detection_for_refresh_rate false
+    /system/bin/resetprop_phh ro.surface_flinger.enable_frame_rate_override false
+    /system/bin/resetprop_phh ro.surface_flinger.set_touch_timer_ms 0
+    /system/bin/resetprop_phh debug.sf.frame_rate_category_mrr false
+    /system/bin/resetprop_phh debug.sf.frame_rate_multiple_threshold 0
     /system/bin/resetprop_phh ro.surface_flinger.has_wide_color_display true
     /system/bin/resetprop_phh ro.surface_flinger.has_HDR_display true
     /system/bin/resetprop_phh ro.surface_flinger.use_color_management true
     /system/bin/resetprop_phh ro.surface_flinger.wcg_composition_dataspace 143261696
     /system/bin/resetprop_phh ro.surface_flinger.max_frame_buffer_acquired_buffers 3
     /system/bin/resetprop_phh vendor.display.enable_dpps_dynamic_fps 1
+    # Match OriginOS 4 stock SF/App durations (from /vendor/etc/display/advanced_sf_offsets.xml v4:
+    # SF=10.333ms / App=10.500ms, SF phase=-2.0ms) so msm_drm.ko vivo_commit_delay_target_time()
+    # has full 360Hz High-TE headroom and heavy blurred pages maintain ~0 GPU missed frames.
+    /system/bin/resetprop_phh service.sf.present_timestamp 1
     /system/bin/resetprop_phh debug.sf.latch_unsignaled 1
+    /system/bin/resetprop_phh debug.sf.auto_latch_unsignaled 0
     /system/bin/resetprop_phh debug.sf.enable_advanced_sf_phase_offset 1
     /system/bin/resetprop_phh debug.sf.use_phase_offsets_as_durations 1
     /system/bin/resetprop_phh debug.sf.enable_gl_backpressure 1
     /system/bin/resetprop_phh debug.sf.disable_client_composition_cache 1
     /system/bin/resetprop_phh debug.sf.early.app.duration 10500000
-    /system/bin/resetprop_phh debug.sf.early.sf.duration 10500000
+    /system/bin/resetprop_phh debug.sf.early.sf.duration 10333333
     /system/bin/resetprop_phh debug.sf.earlyGl.app.duration 10500000
-    /system/bin/resetprop_phh debug.sf.earlyGl.sf.duration 10500000
+    /system/bin/resetprop_phh debug.sf.earlyGl.sf.duration 10333333
     /system/bin/resetprop_phh debug.sf.late.app.duration 10500000
-    /system/bin/resetprop_phh debug.sf.late.sf.duration 10500000
+    /system/bin/resetprop_phh debug.sf.late.sf.duration 10333333
+    # Match OriginOS 4 stock HWUI cache sizes (avoids glyph/layer/path eviction during Settings/UI scroll)
+    /system/bin/resetprop_phh ro.hwui.texture_cache_size 72
+    /system/bin/resetprop_phh ro.hwui.layer_cache_size 48
+    /system/bin/resetprop_phh ro.hwui.r_buffer_cache_size 8
+    /system/bin/resetprop_phh ro.hwui.path_cache_size 32
+    /system/bin/resetprop_phh ro.hwui.gradient_cache_size 1
+    /system/bin/resetprop_phh ro.hwui.drop_shadow_cache_size 6
+    /system/bin/resetprop_phh ro.hwui.texture_cache_flushrate 0.4
+    /system/bin/resetprop_phh ro.hwui.text_small_cache_width 1024
+    /system/bin/resetprop_phh ro.hwui.text_small_cache_height 1024
+    /system/bin/resetprop_phh ro.hwui.text_large_cache_width 2048
+    /system/bin/resetprop_phh ro.hwui.text_large_cache_height 1024
 
     NEO9_LOG="/metadata/gsi/dsu/neo9_udfps.log"
     echo "=== NEO9 UDFPS BOOT $(date 2>/dev/null) ===" > "$NEO9_LOG" 2>/dev/null || true
@@ -589,6 +663,24 @@ if getprop ro.vendor.build.fingerprint | grep -qi "vivo/PD2338"; then
         mount -o bind /mnt/phh/neo9_oem /oem >> "$NEO9_LOG" 2>&1
         echo "[rw-system] bind-mounted /mnt/phh/neo9_oem -> /oem (rc=$?)" >> "$NEO9_LOG" 2>&1
         ls -laZ /oem /oem/etc >> "$NEO9_LOG" 2>&1
+    fi
+
+    # NEO9_COMPOSER_HOOK: patch PD2338 vendor composer HAL (12 bytes) so 5 unique RM692H5 HWC configs
+    # (60/72/90/120 Hz LTPO + 144 Hz, dropping duplicate non-LTPO configs 2/3/6) and OriginOS config groups
+    # are exposed to any GSI SurfaceFlinger
+    NEO9_CMP_SRC="/vendor/bin/hw/vendor.qti.hardware.display.composer-service"
+    NEO9_CMP_DST="/mnt/phh/neo9_composer_svc"
+    if [ -x "$NEO9_CMP_SRC" ] && [ -x /system/bin/neo9-udfps-bridge ]; then
+        if /system/bin/neo9-udfps-bridge --patch-composer "$NEO9_CMP_SRC" "$NEO9_CMP_DST" >> "$NEO9_LOG" 2>&1; then
+            NEO9_CMP_CTX="$(ls -lZ "$NEO9_CMP_SRC" | grep -oE 'u:object_r:[^:]*:s0')"
+            chmod 0755 "$NEO9_CMP_DST"
+            [ -n "$NEO9_CMP_CTX" ] && chcon "$NEO9_CMP_CTX" "$NEO9_CMP_DST" >> "$NEO9_LOG" 2>&1
+            mount -o bind "$NEO9_CMP_DST" "$NEO9_CMP_SRC" >> "$NEO9_LOG" 2>&1
+            echo "[rw-system] bind-mounted $NEO9_CMP_DST -> $NEO9_CMP_SRC (ctx=$NEO9_CMP_CTX, rc=$?)" >> "$NEO9_LOG" 2>&1
+            ls -lZ "$NEO9_CMP_SRC" >> "$NEO9_LOG" 2>&1
+        else
+            echo "[rw-system] --patch-composer failed (rc=$?)" >> "$NEO9_LOG" 2>&1
+        fi
     fi
 fi
 EOF
@@ -703,6 +795,20 @@ if getprop ro.vendor.build.fingerprint | grep -qi "vivo/PD2338"; then
     appops set com.android.camera WRITE_SETTINGS allow 2>/dev/null || true
     appops set com.android.camera SYSTEM_ALERT_WINDOW allow 2>/dev/null || true
 
+    # Enable cross-group refresh-rate switching (allowGroupSwitching=true) if unset,
+    # and initialize OriginOS-style single refresh-rate lock (120.0 Hz LTPO default; min = peak).
+    NEO9_MCFR="$(settings --user current get secure match_content_frame_rate 2>/dev/null || true)"
+    if [ -z "$NEO9_MCFR" ] || [ "$NEO9_MCFR" = "null" ]; then
+        settings --user current put secure match_content_frame_rate 2 2>/dev/null || true
+    fi
+    NEO9_PEAK="$(settings --user current get system peak_refresh_rate 2>/dev/null || true)"
+    if [ -z "$NEO9_PEAK" ] || [ "$NEO9_PEAK" = "null" ] || [ "$NEO9_PEAK" = "0" ] || [ "$NEO9_PEAK" = "0.0" ]; then
+        NEO9_PEAK="120.0"
+        settings --user current put system peak_refresh_rate "$NEO9_PEAK" 2>/dev/null || true
+    fi
+    settings --user current put system extreme_refresh_rate 0 2>/dev/null || true
+    settings --user current put system min_refresh_rate "$NEO9_PEAK" 2>/dev/null || true
+
     # One-shot AOT native compilation for VivoCamera (212MB, 16 DEX) & Vivo3rdAlgoService
     # Matches OriginOS 4's prebuilt 9MB .odex to eliminate JIT/interpreter UI lag and heat!
     NEO9_CAM_SZ="$(stat -c %s /system/system_ext/priv-app/VivoCamera/VivoCamera.apk 2>/dev/null || echo 1)"
@@ -737,7 +843,9 @@ for chk in \
     "$MNT/system/system_ext/etc/selinux/system_ext_service_contexts:service_contexts_file" \
     "$MNT/system/system_ext/etc/selinux/system_ext_mac_permissions.xml:mac_perms_file" \
     "$MNT/system/system_ext/etc/selinux/system_ext_seapp_contexts:seapp_contexts_file" \
-    "$MNT/system/system_ext/etc/neo9_qdcm_rm692h5.json:system_file"; do
+    "$MNT/system/system_ext/etc/neo9_qdcm_rm692h5.json:system_file" \
+    "$MNT/system/bin/surfaceflinger:surfaceflinger_exec" \
+    "$MNT/system/lib64/libneo9_sf_hook.so:system_lib_file"; do
     f="${chk%:*}"; t="${chk#*:}"
     ls -lZ "$f" | grep -q ":$t:" || { echo "FATAL: SELinux label mismatch on $f (expected $t)!"; exit 1; }
 done

@@ -17,6 +17,13 @@
         <item>502</item>
     </integer-array>
 
+    <!-- PD2338 RM692H5 Refresh Rate & 8T LTPO defaults:
+         Default peak 120 Hz keeps daily use inside HWC group 0 (60/72/90/120 Hz 360Hz High-TE seamless LTPO),
+         while 144 Hz (HWC group 1) is selectable in Settings / Per-App / Extreme Refresh Rate via allowGroupSwitching. -->
+    <integer name="config_defaultPeakRefreshRate">120</integer>
+    <integer name="config_defaultRefreshRate">0</integer>
+    <bool name="config_supportsSeamlessRefreshRateSwitching">true</bool>
+
     <!-- Enable Adaptive / Automatic Brightness (stock OriginOS 4 defines this in /product, not /vendor) -->
     <bool name="config_automatic_brightness_available">true</bool>
     <integer name="config_autoBrightnessBrighteningLightDebounce">1500</integer>
