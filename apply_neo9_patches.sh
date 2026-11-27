@@ -33,6 +33,9 @@ VIVO_CAM_HOOK="$KIT_DIR/camera/libneo9_cam_hook.so"
 VIVO_CAM_PATCH_PY="$KIT_DIR/camera/patch_cameraserver.py"
 SF_EPT_HOOK="$KIT_DIR/display/libneo9_sf_hook.so"
 SF_PATCH_PY="$KIT_DIR/display/patch_surfaceflinger.py"
+GPU_BLOBS_DIR="$KIT_DIR/gpu/blobs/lib64"
+GPU_VK14_XML="$KIT_DIR/gpu/android.hardware.vulkan.version-1_4.xml"
+GPU_VK14_VERIFY="$KIT_DIR/gpu/neo9-vk14-verify"
 OVERLAY_CERT_DER="$KIT_DIR/overlay/neo9_overlay_cert.der"
 AVBFORGE_CORE="$(pm path io.github.fu.avbforge | sed 's/package://;s|base.apk|lib/arm64/libavbforge_core.so|')"
 
@@ -81,6 +84,12 @@ if [ -f "$SE_FC" ]; then
     fi
     if [ -f "$VIVO_VCS_BIN" ] && ! grep -q "/system/bin/vivocameraserver" "$SE_FC"; then
         echo "/system/bin/vivocameraserver u:object_r:cameraserver_exec:s0" >> "$SE_FC"
+    fi
+    if [ -d "$GPU_BLOBS_DIR" ] && ! grep -q "neo9_adreno_v863/egl" "$SE_FC"; then
+        cat >> "$SE_FC" <<'EOF'
+/system/system_ext/neo9_adreno_v863/egl(/.*)? u:object_r:same_process_hal_file:s0
+/system/system_ext/neo9_adreno_v863/bind(/.*)? u:object_r:same_process_hal_file:s0
+EOF
     fi
     chmod 0644 "$SE_FC"
 fi
@@ -462,6 +471,56 @@ if [ -f "$SF_EPT_HOOK" ] && [ -f "$SF_PATCH_PY" ]; then
     ls -lZ "$MNT/system/lib64/libneo9_sf_hook.so" "$MNT/system/bin/surfaceflinger"
 fi
 
+# 3b7. Install Module 5: Closed-Source Adreno 740 V@0863.1 (Vulkan 1.4.295) + V@0800.77 (GLES 3.2)
+# Zero-overlayfs pure bind-mount architecture:
+# - egl/: 7 EGL libs + 9 new companion/V863/shim libs -> bind-mounted onto /vendor/lib64/egl
+#   (both [system] sphal and [vendor] namespaces already include /vendor/lib64/egl in search.paths!)
+# - bind/: 5 existing GPU libs -> individually bind-mounted onto /vendor/lib64/...
+# Leaves all 1640+ stock /vendor/lib64 libs (keymint, qseecomd, OpenCL, camera, audio, RIL) 100% untouched!
+if [ -d "$GPU_BLOBS_DIR" ] && [ -f "$GPU_BLOBS_DIR/hw/vulkan.adreno.so" ] && [ -f "$GPU_BLOBS_DIR/libc35.so" ]; then
+    echo "[3b7] Installing Module 5: Closed-Source Adreno V@0863.1 (Vulkan 1.4.295) + V@0800.77 (GLES 3.2)..."
+    GPU_ROOT="$MNT/system/system_ext/neo9_adreno_v863"
+    GPU_EGL="$GPU_ROOT/egl"
+    GPU_BIND="$GPU_ROOT/bind"
+    rm -rf "$GPU_ROOT"
+    mkdir -p "$GPU_EGL" "$GPU_BIND"
+    # 7 EGL libs + 9 new companion/V863/shim libs into egl/
+    cp "$GPU_BLOBS_DIR/egl"/*.so "$GPU_EGL/"
+    for f in libc35.so libmapperutils.so android.hardware.graphics.allocator-V2-ndk.so \
+             adrenoutils_extra.so notgsl.so notadreno_utils.so \
+             notllvm-glnext.so notllvm-qgl.so notllvm-qcom.so; do
+        cp "$GPU_BLOBS_DIR/$f" "$GPU_EGL/$f"
+    done
+    # 5 existing GPU files into bind/
+    cp "$GPU_BLOBS_DIR/hw/vulkan.adreno.so" "$GPU_BIND/vulkan.adreno.so"
+    for f in libgsl.so libadreno_utils.so libllvm-glnext.so libllvm-qgl.so; do
+        cp "$GPU_BLOBS_DIR/$f" "$GPU_BIND/$f"
+    done
+    chown -R 0:0 "$GPU_ROOT"
+    chmod 0755 "$GPU_ROOT" "$GPU_EGL" "$GPU_BIND"
+    chmod 0644 "$GPU_EGL"/*.so "$GPU_BIND"/*.so
+    chcon u:object_r:system_file:s0 "$GPU_ROOT"
+    chcon u:object_r:same_process_hal_file:s0 "$GPU_EGL" "$GPU_BIND" "$GPU_EGL"/*.so "$GPU_BIND"/*.so
+
+    if [ -f "$GPU_VK14_XML" ]; then
+        mkdir -p "$MNT/system/system_ext/etc/permissions"
+        cp "$GPU_VK14_XML" "$MNT/system/system_ext/etc/permissions/android.hardware.vulkan.version-1_4.xml"
+        chmod 0644 "$MNT/system/system_ext/etc/permissions/android.hardware.vulkan.version-1_4.xml"
+        chown 0:0 "$MNT/system/system_ext/etc/permissions/android.hardware.vulkan.version-1_4.xml"
+        chcon u:object_r:system_file:s0 "$MNT/system/system_ext/etc/permissions/android.hardware.vulkan.version-1_4.xml"
+    fi
+    if [ -f "$GPU_VK14_VERIFY" ]; then
+        cp "$GPU_VK14_VERIFY" "$MNT/system/bin/neo9-vk14-verify"
+        chmod 0755 "$MNT/system/bin/neo9-vk14-verify"
+        chown 0:2000 "$MNT/system/bin/neo9-vk14-verify"
+        chcon u:object_r:system_file:s0 "$MNT/system/bin/neo9-vk14-verify"
+        ls -lZ "$MNT/system/bin/neo9-vk14-verify"
+    fi
+    rm -f "$MNT/system/bin/neo9-boot-diag.sh"
+    ls -ldZ "$GPU_EGL" "$GPU_BIND"
+    ls -lZ "$GPU_BIND/vulkan.adreno.so" "$GPU_EGL/libGLESv2_adreno.so" "$GPU_EGL/libc35.so"
+fi
+
 # 3c. Inject/refresh early post-fs HAL SensorLocation & telephony hook in rw-system.sh (preserve phhsu_exec xattr!)
 RW_SH="$MNT/system/bin/rw-system.sh"
 if grep -q "# NEO9_UDFPS_HOOK:" "$RW_SH"; then
@@ -607,6 +666,23 @@ if getprop ro.vendor.build.fingerprint | grep -qi "vivo/PD2338"; then
         mount -o bind "$NEO9_QDB_DST" "$NEO9_QDB_TGT" >> "$NEO9_LOG" 2>&1
         echo "[rw-system] bind-mounted $NEO9_QDB_DST -> $NEO9_QDB_TGT (ctx=$NEO9_QDB_CTX, rc=$?)" >> "$NEO9_LOG" 2>&1
         ls -lZ "$NEO9_QDB_TGT" >> "$NEO9_LOG" 2>&1
+    fi
+
+    # NEO9_GPU_HOOK (Module 5): zero-overlayfs pure bind-mount for closed-source Adreno 740
+    # V@0863.1 (Vulkan 1.4.295) + V@0800.77 (GLES 3.2), preserving stock OpenCL 3.0 and all 1640+ vendor libs!
+    # Both [system] sphal and [vendor] namespaces already search /vendor/lib64/egl.
+    NEO9_GPU_ROOT="/system/system_ext/neo9_adreno_v863"
+    if [ -f "$NEO9_GPU_ROOT/bind/vulkan.adreno.so" ] && [ -f "$NEO9_GPU_ROOT/egl/libc35.so" ]; then
+        mount -o bind "$NEO9_GPU_ROOT/egl" /vendor/lib64/egl >> "$NEO9_LOG" 2>&1
+        rc_egl=$?
+        mount -o bind "$NEO9_GPU_ROOT/bind/vulkan.adreno.so" /vendor/lib64/hw/vulkan.adreno.so >> "$NEO9_LOG" 2>&1
+        rc_vk=$?
+        rc_core=0
+        for g in libgsl.so libadreno_utils.so libllvm-glnext.so libllvm-qgl.so; do
+            mount -o bind "$NEO9_GPU_ROOT/bind/$g" "/vendor/lib64/$g" >> "$NEO9_LOG" 2>&1 || rc_core=$?
+        done
+        echo "[rw-system] bind-mounted Adreno V@0863.1(VK1.4)+V@0800.77(GLES) (egl=$rc_egl vk=$rc_vk core=$rc_core)" >> "$NEO9_LOG" 2>&1
+        ls -lZ /vendor/lib64/hw/vulkan.adreno.so /vendor/lib64/egl/libGLESv2_adreno.so /vendor/lib64/egl/libc35.so >> "$NEO9_LOG" 2>&1
     fi
 
     # NEO9_MCX_MFL_HOOK: patch 4-byte NULL-deref debug log branch in PD2338 com.qualcomm.mcx.policy.mfl.so
@@ -818,6 +894,29 @@ if getprop ro.vendor.build.fingerprint | grep -qi "vivo/PD2338"; then
         cmd package compile -m speed -f com.vivo.vivo3rdalgoservice >/dev/null 2>&1 || true
         touch "$NEO9_AOT_STAMP" 2>/dev/null || true
     fi
+
+    # Module 5 GPU boot verification log (persisted in /metadata/gsi/dsu/ so Host can inspect after DSU reboot)
+    NEO9_GPU_LOG="/metadata/gsi/dsu/neo9_gpu.log"
+    {
+        echo "=== NEO9 GPU BOOT VERIFY $(date 2>/dev/null) ==="
+        echo "--- mount /vendor/lib64 ---"
+        mount | grep "/vendor/lib64" || true
+        echo "--- key driver files ---"
+        ls -lZ /vendor/lib64/hw/vulkan.adreno.so /vendor/lib64/egl/libGLESv2_adreno.so /vendor/lib64/egl/libc35.so /vendor/lib64/libgsl.so /vendor/lib64/com.qualcomm.mcx.policy.mfl.so 2>&1 || true
+        echo "--- SurfaceFlinger GLES/RenderEngine ---"
+        dumpsys SurfaceFlinger 2>/dev/null | grep -iE "GLES:|Vulkan|RenderEngine" | head -n 20 || true
+        echo "--- PackageManager vulkan features ---"
+        pm list features 2>/dev/null | grep -i vulkan || true
+        echo "--- neo9-vk14-verify (/system/lib64/libvulkan.so) ---"
+        if [ -x /system/bin/neo9-vk14-verify ]; then
+            /system/bin/neo9-vk14-verify 2>&1
+            echo "vk14_verify_rc=$?"
+        fi
+        echo "--- dmesg AVC / KGSL ---"
+        dmesg 2>/dev/null | grep -iE "avc:.*(adreno|vulkan|gles|libc35|mapperutils|allocator|overlay|neo9_adreno)|kgsl.*(err|fault|hang)" | tail -n 30 || true
+        echo "--- logcat GPU ---"
+        logcat -d -t 400 2>/dev/null | grep -iE "vulkan|Adreno|SurfaceFlinger.*GLES|RenderEngine|libEGL|libc35" | tail -n 30 || true
+    } > "$NEO9_GPU_LOG" 2>&1 || true
 fi
 EOF
     chmod 0755 "$PHH_BOOT"
@@ -845,7 +944,12 @@ for chk in \
     "$MNT/system/system_ext/etc/selinux/system_ext_seapp_contexts:seapp_contexts_file" \
     "$MNT/system/system_ext/etc/neo9_qdcm_rm692h5.json:system_file" \
     "$MNT/system/bin/surfaceflinger:surfaceflinger_exec" \
-    "$MNT/system/lib64/libneo9_sf_hook.so:system_lib_file"; do
+    "$MNT/system/lib64/libneo9_sf_hook.so:system_lib_file" \
+    "$MNT/system/system_ext/neo9_adreno_v863/bind/vulkan.adreno.so:same_process_hal_file" \
+    "$MNT/system/system_ext/neo9_adreno_v863/egl/libGLESv2_adreno.so:same_process_hal_file" \
+    "$MNT/system/system_ext/neo9_adreno_v863/egl/libc35.so:same_process_hal_file" \
+    "$MNT/system/system_ext/etc/permissions/android.hardware.vulkan.version-1_4.xml:system_file" \
+    "$MNT/system/bin/neo9-vk14-verify:system_file"; do
     f="${chk%:*}"; t="${chk#*:}"
     ls -lZ "$f" | grep -q ":$t:" || { echo "FATAL: SELinux label mismatch on $f (expected $t)!"; exit 1; }
 done

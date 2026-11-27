@@ -14,6 +14,8 @@
 *.img.xz
 udfps/neo9-udfps-bridge
 camera/neo9_vivocameraserver
+gpu/neo9-vk14-verify
+gpu/blobs/
 
 # Python / editor / runtime logs
 __pycache__/

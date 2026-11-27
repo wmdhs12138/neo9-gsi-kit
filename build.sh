@@ -61,6 +61,12 @@ if command -v llvm-readelf >/dev/null 2>&1; then
     fi
 fi
 
+echo "[3c/8] Compiling Module 5 Vulkan 1.4 boot verifier (neo9-vk14-verify)..."
+clang -O2 -Wall -Wextra \
+    -o "$KIT_DIR/gpu/neo9-vk14-verify" \
+    "$KIT_DIR/gpu/neo9_vk14_verify.c" -ldl
+strip "$KIT_DIR/gpu/neo9-vk14-verify" 2>/dev/null || true
+
 echo "[4/8] Building & APK-v2 signing static RRO overlays..."
 python3 "$KIT_DIR/overlay/build_overlay.py" "$FRAMEWORK_RES"
 python3 "$KIT_DIR/telephony/build_ims_overlays.py" "$FRAMEWORK_RES"

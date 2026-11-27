@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Module 5: Advertise Vulkan 1.4 hardware support (Qualcomm V@0863.1, API 1.4.295) -->
+<permissions>
+    <feature name="android.hardware.vulkan.version" version="4210688" />
+</permissions>
